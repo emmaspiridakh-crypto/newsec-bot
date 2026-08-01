@@ -29,7 +29,7 @@ def build_panel(cfg: dict, disabled: list, guild_icon: str | None) -> list:
 
     header = {
         "type": 9,
-        "components": [{"type": 10, "content": "> Security Control Panel\nManage modules and settings."}],
+        "components": [{"type": 10, "content": "> Security Control Panel\nManage settings."}],
     }
     if guild_icon:
         header["accessory"] = {"type": 11, "media": {"url": guild_icon}}
