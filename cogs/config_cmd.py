@@ -43,7 +43,7 @@ class ConfigCmd(commands.Cog):
                 lines.append(f"• **{k}** = `{val}`\n  > {desc}")
             await edit_original_cv2(interaction, [
                 {"type": 17, "accent_color": 0x5865F2, "components": [
-                    {"type": 10, "content": "> Security Configuration"},
+                    {"type": 10, "content": "> Security Config"},
                     {"type": 14},
                     {"type": 10, "content": "\n\n".join(lines)},
                     {"type": 14},
