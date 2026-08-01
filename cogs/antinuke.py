@@ -1,28 +1,34 @@
 import asyncio
 import datetime
+import json
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from database import Database
-from utils.cv2_helper import send_cv2
+from utils.cv2_helper import send_cv2, edit_original_cv2, no_access
 from utils.tracker import ban_tracker, kick_tracker, channel_del_tracker, role_action_tracker
 
 DANGEROUS_PERMS = (
     "administrator", "ban_members", "kick_members", "manage_guild",
     "manage_roles", "manage_channels", "manage_webhooks",
     "mention_everyone", "manage_messages",
-), role_tracker
+)
 
 
 class AntiNuke(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def _is_owner(self, guild_id: int, uid: int) -> bool:
+        return await Database.is_server_owner(str(guild_id), str(uid), self.bot.installer_id)
+
     async def _log_id(self, guild_id: str) -> int | None:
         val = await Database.get_setting(guild_id, "log_channel_id")
         return int(val) if val else None
 
+    # ── Punish + Lockdown ──────────────────────────────────
     async def _punish(self, guild: discord.Guild, moderator: discord.Member, reason: str):
         gid = str(guild.id)
         if await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
@@ -33,7 +39,8 @@ class AntiNuke(commands.Cog):
         except Exception as e:
             print(f"[AntiNuke] timeout failed: {e}")
 
-        tasks = []
+        tasks        = []
+        locked_ids   = []
         for channel in guild.channels:
             if isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
                 ow = channel.overwrites_for(guild.default_role)
@@ -42,14 +49,21 @@ class AntiNuke(commands.Cog):
                 tasks.append(channel.set_permissions(
                     guild.default_role, overwrite=ow, reason="Anti-Nuke Lockdown"
                 ))
+                locked_ids.append(channel.id)
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        locked  = sum(1 for r in results if not isinstance(r, Exception))
+        locked  = [cid for cid, r in zip(locked_ids, results) if not isinstance(r, Exception)]
+
+        # Remember which channels we locked so /unlock only touches those.
+        existing = json.loads(await Database.get_setting(gid, "lockdown_channels", "[]") or "[]")
+        merged   = sorted(set(existing) | set(locked))
+        await Database.set_setting(gid, "lockdown_channels", json.dumps(merged))
+        await Database.set_setting(gid, "lockdown_active", "1")
 
         await Database.log_event(gid, "mass_action", {
             "user":   str(moderator),
             "id":     str(moderator.id),
             "reason": reason,
-            "locked": locked
+            "locked": len(locked)
         })
 
         cid = await self._log_id(gid)
@@ -65,13 +79,67 @@ class AntiNuke(commands.Cog):
                             f"• Moderator: {moderator.mention}  ({moderator.id})\n"
                             f"• Trigger: {reason}\n"
                             f"• Action: 1 week timeout\n"
-                            f"• Lockdown: {locked} / {len(tasks)} channels locked"
+                            f"• Lockdown: {len(locked)} / {len(tasks)} channels locked\n"
+                            f"• Use `/unlock` to lift the lockdown once it's safe."
                         )}],
                         "accessory": {"type": 11, "media": {"url": str(moderator.display_avatar.url)}}
                     }
                 ]
             }])
 
+    # ── /unlock ─────────────────────────────────────────────
+    @app_commands.command(name="unlock", description="Lift an active Anti-Nuke lockdown")
+    async def unlock(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        gid = str(interaction.guild_id)
+        if not await self._is_owner(interaction.guild_id, interaction.user.id):
+            await no_access(interaction); return
+
+        locked_ids = json.loads(await Database.get_setting(gid, "lockdown_channels", "[]") or "[]")
+        if not locked_ids:
+            await edit_original_cv2(interaction, [
+                {"type": 17, "accent_color": 0x5865F2, "components": [
+                    {"type": 10, "content": "> No active lockdown\nNothing to unlock."}
+                ]}
+            ], ephemeral=True)
+            return
+
+        guild  = interaction.guild
+        tasks  = []
+        undone = []
+        for cid in locked_ids:
+            channel = guild.get_channel(cid)
+            if channel is None:
+                continue
+            ow = channel.overwrites_for(guild.default_role)
+            ow.send_messages = None
+            ow.connect       = None
+            tasks.append(channel.set_permissions(
+                guild.default_role, overwrite=ow, reason=f"Lockdown lifted by {interaction.user}"
+            ))
+            undone.append(cid)
+
+        results  = await asyncio.gather(*tasks, return_exceptions=True)
+        unlocked = sum(1 for r in results if not isinstance(r, Exception))
+
+        await Database.set_setting(gid, "lockdown_channels", "[]")
+        await Database.set_setting(gid, "lockdown_active", "0")
+        await Database.log_event(gid, "lockdown", {
+            "user": str(interaction.user), "id": str(interaction.user.id),
+            "unlocked": unlocked
+        })
+
+        await edit_original_cv2(interaction, [
+            {"type": 17, "accent_color": 0x57F287, "components": [
+                {"type": 10, "content": (
+                    f"> Lockdown Lifted\n"
+                    f"• Channels restored: {unlocked} / {len(undone)}\n"
+                    f"• By: {interaction.user.mention}"
+                )}
+            ]}
+        ], ephemeral=True)
+
+    # ── Mass Ban ────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User):
         gid = str(guild.id)
@@ -96,6 +164,7 @@ class AntiNuke(commands.Cog):
             if member:
                 await self._punish(guild, member, f"Mass Ban ({limit}/{window}s)")
 
+    # ── Mass Kick ───────────────────────────────────────────
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         guild = member.guild
@@ -123,6 +192,7 @@ class AntiNuke(commands.Cog):
                         await self._punish(guild, mod_member, f"Mass Kick ({limit}/{window}s)")
                 break
 
+    # ── Mass Channel Delete ─────────────────────────────────
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
@@ -148,82 +218,6 @@ class AntiNuke(commands.Cog):
             member = guild.get_member(moderator.id)
             if member:
                 await self._punish(guild, member, f"Mass Channel Delete ({limit}/{window}s)")
-
-
-    @commands.Cog.listener()
-    async def on_guild_role_delete(self, role: discord.Role):
-        await self._track_role_action(role.guild, discord.AuditLogAction.role_delete, "role_del")
-
-    @commands.Cog.listener()
-    async def on_guild_role_create(self, role: discord.Role):
-        await self._track_role_action(role.guild, discord.AuditLogAction.role_create, "role_create")
-
-    async def _track_role_action(self, guild: discord.Guild, audit_action, key_prefix: str):
-        gid = str(guild.id)
-        if not await Database.is_module_enabled(gid, "role_abuse"):
-            return
-        await asyncio.sleep(0.5)
-        try:
-            entries = [e async for e in guild.audit_logs(limit=1, action=audit_action)]
-        except Exception:
-            return
-        if not entries:
-            return
-        moderator = entries[0].user
-        if moderator.bot or await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
-            return
-        limit  = int(await Database.get_config(gid, "mass_action_limit",  "3"))
-        window = int(await Database.get_config(gid, "mass_action_window", "10"))
-        key    = f"{key_prefix}_{guild.id}_{moderator.id}"
-        if role_tracker.add_and_check(key, limit, window):
-            role_tracker.reset(key)
-            member = guild.get_member(moderator.id)
-            if member:
-                label = "Mass Role Delete" if key_prefix == "role_del" else "Mass Role Create"
-                await self._punish(guild, member, f"{label} ({limit}/{window}s)")
-
-    @commands.Cog.listener()
-    async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
-        guild = after.guild
-        gid   = str(guild.id)
-        if not await Database.is_module_enabled(gid, "role_abuse"):
-            return
-
-        # Only care about permission escalation, not name/color changes
-        gained_admin = (not before.permissions.administrator) and after.permissions.administrator
-        dangerous = {"kick_members", "ban_members", "manage_channels", "manage_roles",
-                     "manage_guild", "manage_webhooks", "mention_everyone"}
-        before_perms = {p for p, v in before.permissions if v}
-        after_perms  = {p for p, v in after.permissions if v}
-        gained_dangerous = (after_perms - before_perms) & dangerous
-
-        if not gained_admin and not gained_dangerous:
-            return
-
-        await asyncio.sleep(0.5)
-        try:
-            entries = [e async for e in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_update)]
-        except Exception:
-            return
-        if not entries:
-            return
-        moderator = entries[0].user
-        if moderator.bot or await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
-            return
-
-        member = guild.get_member(moderator.id)
-        if not member:
-            return
-
-        reason = "Granted Administrator" if gained_admin else f"Granted: {', '.join(sorted(gained_dangerous))}"
-        # No threshold — a single privilege escalation is punished immediately.
-        try:
-            await after.edit(permissions=before.permissions, reason="Anti-Nuke: permission escalation reverted")
-        except Exception as e:
-            print(f"[AntiNuke] role revert failed: {e}")
-
-        await self._punish(guild, member, f"Role Escalation on '{after.name}' — {reason}")
-
 
     # ── Mass Role Create / Delete ──────────────────────────
     async def _handle_role_spam(self, guild: discord.Guild, action_type, verb: str, key_prefix: str):
@@ -269,8 +263,8 @@ class AntiNuke(commands.Cog):
         if not await Database.is_module_enabled(gid, "role_action"):
             return
 
-        before_perms = before.permissions
-        after_perms  = after.permissions
+        before_perms  = before.permissions
+        after_perms   = after.permissions
         newly_granted = [
             p for p in DANGEROUS_PERMS
             if not getattr(before_perms, p) and getattr(after_perms, p)
@@ -289,8 +283,13 @@ class AntiNuke(commands.Cog):
         if moderator.bot or await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
             return
 
-        # Permission escalation triggers immediately — no threshold needed,
-        # a single "administrator" grant to a role is enough to nuke a server.
+        # Revert the escalation itself, then punish — no threshold needed,
+        # a single "administrator" grant is enough to nuke a server.
+        try:
+            await after.edit(permissions=before_perms, reason="Anti-Nuke: permission escalation reverted")
+        except Exception as e:
+            print(f"[AntiNuke] role revert failed: {e}")
+
         await Database.log_event(gid, "perm_escalation", {
             "user": str(moderator), "id": str(moderator.id),
             "role": after.name, "perms": ", ".join(newly_granted)
