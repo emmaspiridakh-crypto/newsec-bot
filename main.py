@@ -28,6 +28,7 @@ COGS = [
     "cogs.config_cmd",
     "cogs.antinuke",
     "cogs.automod",
+    "cogs.bot_status",
 ]
 
 @bot.event
