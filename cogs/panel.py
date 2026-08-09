@@ -135,6 +135,9 @@ def build_logs(events: list, guild_icon: str | None) -> list:
         "channel_delete": "Channel Delete",
         "perm_escalation":"Permission Escalation",
         "lockdown":       "Lockdown",
+        "webhook_spam":   "Webhook Spam",
+        "dangerous_bot_add": "Dangerous Bot Added",
+        "guild_vandalism":"Server Settings Changed",
     }
 
     if not events:
@@ -211,13 +214,13 @@ class Panel(commands.Cog):
     # ── /panel ────────────────────────────────────────────
     @app_commands.command(name="panel", description="Security Control Panel")
     async def panel(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
         gid = str(interaction.guild_id)
         if not await self._is_owner(interaction.guild_id, interaction.user.id):
             await no_access(interaction); return
         cfg      = await Database.get_all_config(gid)
         disabled = await Database.get_disabled_modules(gid)
-        await edit_original_cv2(interaction, build_panel(cfg, disabled, self._icon(interaction.guild)))
+        await edit_original_cv2(interaction, build_panel(cfg, disabled, self._icon(interaction.guild)), ephemeral=True)
 
     # ── /status ───────────────────────────────────────────
     @app_commands.command(name="status", description="Security status overview")
