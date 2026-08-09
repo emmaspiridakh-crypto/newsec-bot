@@ -8,7 +8,10 @@ from discord import app_commands
 
 from database import Database
 from utils.cv2_helper import send_cv2, edit_original_cv2, no_access
-from utils.tracker import ban_tracker, kick_tracker, channel_del_tracker, role_action_tracker
+from utils.tracker import (
+    ban_tracker, kick_tracker, channel_del_tracker, role_action_tracker,
+    webhook_tracker,
+)
 
 DANGEROUS_PERMS = (
     "administrator", "ban_members", "kick_members", "manage_guild",
@@ -34,10 +37,31 @@ class AntiNuke(commands.Cog):
         if await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
             return
 
+        timeout_ok = True
         try:
             await moderator.timeout(datetime.timedelta(weeks=1), reason=reason)
         except Exception as e:
+            timeout_ok = False
             print(f"[AntiNuke] timeout failed: {e}")
+
+        # Strip any dangerous permissions the moderator holds via roles.
+        # Timeout alone doesn't stop a compromised account from acting through
+        # a webhook/bot it already set up, so pull the risky roles too.
+        stripped_roles = []
+        removable = [
+            r for r in moderator.roles
+            if r != guild.default_role
+            and r < guild.me.top_role
+            and any(getattr(r.permissions, p) for p in DANGEROUS_PERMS)
+        ]
+        if removable:
+            try:
+                await moderator.remove_roles(*removable, reason=reason)
+                stripped_roles = [r.name for r in removable]
+            except Exception as e:
+                print(f"[AntiNuke] role strip failed: {e}")
+
+        hierarchy_warning = not timeout_ok and not stripped_roles
 
         tasks        = []
         locked_ids   = []
@@ -66,6 +90,16 @@ class AntiNuke(commands.Cog):
             "locked": len(locked)
         })
 
+        role_line = (
+            f"• Roles stripped: {', '.join(stripped_roles)}\n" if stripped_roles
+            else "• Roles stripped: none (no dangerous role held below bot's position)\n"
+        )
+        warning_line = (
+            "\n> ⚠ WARNING: timeout AND role strip both failed — this moderator likely "
+            "outranks the bot in the role hierarchy. Manual intervention required.\n"
+            if hierarchy_warning else ""
+        )
+
         cid = await self._log_id(gid)
         if cid:
             await send_cv2(cid, [{
@@ -78,9 +112,11 @@ class AntiNuke(commands.Cog):
                             f"> ANTI-NUKE TRIGGERED\n"
                             f"• Moderator: {moderator.mention}  ({moderator.id})\n"
                             f"• Trigger: {reason}\n"
-                            f"• Action: 1 week timeout\n"
+                            f"• Action: {'1 week timeout' if timeout_ok else 'timeout FAILED'}\n"
+                            f"{role_line}"
                             f"• Lockdown: {len(locked)} / {len(tasks)} channels locked\n"
                             f"• Use `/unlock` to lift the lockdown once it's safe."
+                            f"{warning_line}"
                         )}],
                         "accessory": {"type": 11, "media": {"url": str(moderator.display_avatar.url)}}
                     }
@@ -218,6 +254,153 @@ class AntiNuke(commands.Cog):
             member = guild.get_member(moderator.id)
             if member:
                 await self._punish(guild, member, f"Mass Channel Delete ({limit}/{window}s)")
+
+    # ── Webhook Spam ────────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_webhook_update(self, channel: discord.abc.GuildChannel):
+        guild = channel.guild
+        gid   = str(guild.id)
+        if not await Database.is_module_enabled(gid, "mass_action"):
+            return
+        await asyncio.sleep(0.5)
+        try:
+            entries = [e async for e in guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create)]
+        except Exception:
+            return
+        if not entries:
+            return
+        moderator = entries[0].user
+        if moderator.bot or await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
+            return
+        limit  = int(await Database.get_config(gid, "mass_action_limit",  "3"))
+        window = int(await Database.get_config(gid, "mass_action_window", "10"))
+        key    = f"webhook_{guild.id}_{moderator.id}"
+        if webhook_tracker.add_and_check(key, limit, window):
+            webhook_tracker.reset(key)
+            await Database.log_event(gid, "webhook_spam", {"user": str(moderator), "channel": channel.name})
+            member = guild.get_member(moderator.id)
+            if member:
+                await self._punish(guild, member, f"Mass Webhook Create ({limit}/{window}s)")
+
+    # ── Bot Added With Dangerous Permissions ───────────────
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if not member.bot:
+            return
+        guild = member.guild
+        gid   = str(guild.id)
+        if not await Database.is_module_enabled(gid, "mass_action"):
+            return
+        if await Database.is_whitelist_bot(gid, str(member.id)):
+            return
+
+        has_dangerous = any(getattr(member.guild_permissions, p) for p in DANGEROUS_PERMS)
+        if not has_dangerous:
+            return
+
+        await asyncio.sleep(0.5)
+        try:
+            entries = [e async for e in guild.audit_logs(
+                limit=3, action=discord.AuditLogAction.bot_add
+            )]
+        except Exception:
+            entries = []
+
+        adder = None
+        for e in entries:
+            if e.target and e.target.id == member.id:
+                adder = e.user
+                break
+        if adder is None or adder.bot:
+            return
+        if await Database.is_server_owner(gid, str(adder.id), self.bot.installer_id):
+            return
+
+        await Database.log_event(gid, "dangerous_bot_add", {
+            "user": str(adder), "id": str(adder.id), "bot": str(member)
+        })
+
+        # Strip the bot's dangerous roles immediately — don't wait on a threshold,
+        # one privileged bot is enough to nuke the server.
+        removable = [
+            r for r in member.roles
+            if r != guild.default_role and r < guild.me.top_role
+            and any(getattr(r.permissions, p) for p in DANGEROUS_PERMS)
+        ]
+        try:
+            if removable:
+                await member.remove_roles(*removable, reason="Anti-Nuke: bot added with dangerous permissions")
+        except Exception as e:
+            print(f"[AntiNuke] dangerous bot role strip failed: {e}")
+
+        cid = await self._log_id(gid)
+        if cid:
+            await send_cv2(cid, [{
+                "type": 17,
+                "accent_color": 0x8B0000,
+                "components": [{
+                    "type": 9,
+                    "components": [{"type": 10, "content": (
+                        f"> DANGEROUS BOT ADDED\n"
+                        f"• Bot: {member.mention}  ({member.id})\n"
+                        f"• Added by: {adder.mention}  ({adder.id})\n"
+                        f"• Permissions stripped: {'yes' if removable else 'none found below bot rank'}\n"
+                        f"• Review and use `/whitelist bot` if this was intentional."
+                    )}],
+                    "accessory": {"type": 11, "media": {"url": str(member.display_avatar.url)}}
+                }]
+            }])
+        adder_member = guild.get_member(adder.id)
+        if adder_member:
+            await self._punish(guild, adder_member, f"Added bot '{member}' with dangerous permissions")
+
+    # ── Server Vandalism (name/icon/vanity URL) ────────────
+    @commands.Cog.listener()
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
+        gid = str(after.id)
+        if not await Database.is_module_enabled(gid, "mass_action"):
+            return
+
+        changes = []
+        if before.name != after.name:
+            changes.append(f"Name: `{before.name}` → `{after.name}`")
+        if before.icon != after.icon:
+            changes.append("Icon changed")
+        if getattr(before, "vanity_url_code", None) != getattr(after, "vanity_url_code", None):
+            changes.append("Vanity URL changed")
+        if not changes:
+            return
+
+        await asyncio.sleep(0.5)
+        try:
+            entries = [e async for e in after.audit_logs(limit=1, action=discord.AuditLogAction.guild_update)]
+        except Exception:
+            return
+        if not entries:
+            return
+        moderator = entries[0].user
+        if moderator.bot or await Database.is_server_owner(gid, str(moderator.id), self.bot.installer_id):
+            return
+
+        await Database.log_event(gid, "guild_vandalism", {
+            "user": str(moderator), "id": str(moderator.id), "changes": changes
+        })
+
+        cid = await self._log_id(gid)
+        if cid:
+            await send_cv2(cid, [{
+                "type": 17,
+                "accent_color": 0xE67E22,
+                "components": [{
+                    "type": 9,
+                    "components": [{"type": 10, "content": (
+                        f"> SERVER SETTINGS CHANGED\n"
+                        f"• By: {moderator.mention}  ({moderator.id})\n"
+                        f"• Changes:\n" + "\n".join(f"  - {c}" for c in changes)
+                    )}],
+                    "accessory": {"type": 11, "media": {"url": str(moderator.display_avatar.url)}}
+                }]
+            }])
 
     # ── Mass Role Create / Delete ──────────────────────────
     async def _handle_role_spam(self, guild: discord.Guild, action_type, verb: str, key_prefix: str):
