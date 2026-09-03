@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from database import Database
-from utils.cv2_helper import no_access
+from utils.cv2_helper import no_access, edit_original_cv2, update_cv2, respond_cv2
 
 ACTIVITY_TYPES = {
     "playing": discord.ActivityType.playing,
@@ -25,32 +25,62 @@ STATUS_TYPES = {
 
 STATUS_NAMES_GR = {
     "online": "Online",
-    "idle": "Idle (Απασχολημένος)",
+    "idle": "Idle",
     "dnd": "Do Not Disturb",
-    "invisible": "Invisible (Offline)",
+    "invisible": "Invisible",
 }
 
-DEFAULT_ROTATE_SECONDS = 20
+DEFAULT_ROTATE_SECONDS = 15
 
-# Global bot presence — not per-guild, so stored under a fixed pseudo-guild key.
 GLOBAL_KEY = "bot_status_global"
 
 
 def _default_data() -> dict:
     return {
         "type": "watching",
-        "text": "το server",
+        "text": "server watching ",
         "presence": "online",
-        "rotate": False,
+        "rotate": True,
         "interval": DEFAULT_ROTATE_SECONDS,
-        "statuses": [],
+
+        "statuses": [
+            {"type": "watching", "text": "〃 Created By: ! 3mma"},
+            {"type": "watching", "text": "〃 Server Protected"},
+        ],
+        "update_override_active": False,
+        "update_override_text": "",
     }
+
+
+class UpdateTextModal(discord.ui.Modal, title="Update Status Text"):
+    def __init__(self, cog: "BotStatus"):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.text_input = discord.ui.TextInput(
+            label="Live status text",
+            placeholder="π.χ. Update in process...",
+            default=cog._last_override_text,
+            max_length=100,
+            required=True,
+        )
+        self.add_item(self.text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        text = str(self.text_input.value).strip()
+        await self.cog.set_update_override(text)
+        await edit_original_cv2(
+            interaction,
+            self.cog._build_update_panel(text, True),
+            ephemeral=True,
+        )
 
 
 class BotStatus(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._rotate_index = 0
+        self._last_override_text = ""
 
     def cog_unload(self):
         if self.rotate_status_loop.is_running():
@@ -59,6 +89,13 @@ class BotStatus(commands.Cog):
     async def _is_owner(self, interaction: discord.Interaction) -> bool:
         gid = str(interaction.guild_id)
         return await Database.is_server_owner(gid, str(interaction.user.id), self.bot.installer_id)
+
+    def _is_installer(self, interaction: discord.Interaction) -> bool:
+        return str(interaction.user.id) == str(self.bot.installer_id)
+
+    def _is_main_server(self, interaction: discord.Interaction) -> bool:
+        main_id = getattr(self.bot, "main_server_id", None)
+        return bool(main_id) and str(interaction.guild_id) == str(main_id)
 
     async def _get_data(self) -> dict:
         raw = await Database.get_setting(GLOBAL_KEY, "data", None)
@@ -75,21 +112,23 @@ class BotStatus(commands.Cog):
 
     def _build_activity(self, entry: dict) -> discord.Activity:
         activity_type = entry.get("type", "watching")
-        text = entry.get("text", "το server")
+        text = entry.get("text", "server watching")
+        if entry.get("dynamic") == "guild_count":
+            text = f"{len(self.bot.guilds)} {text}"
         return discord.Activity(
             type=ACTIVITY_TYPES.get(activity_type, discord.ActivityType.watching),
             name=text,
         )
 
     async def _apply_presence(self, entry: dict | None = None):
-        """Εφαρμόζει status+presence στο bot. Το bot συνεχίζει να δουλεύει κανονικά
-        ανεξάρτητα από το ποιο presence (online/idle/dnd/invisible) δείχνει."""
         data = await self._get_data()
         status_key = data.get("presence", "online")
         discord_status = STATUS_TYPES.get(status_key, discord.Status.online)
 
-        if entry is None:
-            entry = {"type": data.get("type", "watching"), "text": data.get("text", "το server")}
+        if data.get("update_override_active") and data.get("update_override_text"):
+            entry = {"type": "watching", "text": data["update_override_text"]}
+        elif entry is None:
+            entry = {"type": data.get("type", "watching"), "text": data.get("text", "server watching")}
 
         activity = self._build_activity(entry)
 
@@ -99,8 +138,16 @@ class BotStatus(commands.Cog):
             pass
 
     async def _apply_saved_status(self):
-        await self._apply_presence()
         data = await self._get_data()
+        self._last_override_text = data.get("update_override_text", "")
+
+        if data.get("update_override_active"):
+            if self.rotate_status_loop.is_running():
+                self.rotate_status_loop.cancel()
+            await self._apply_presence()
+            return
+
+        await self._apply_presence()
         if data.get("rotate") and data.get("statuses"):
             interval = max(5, int(data.get("interval", DEFAULT_ROTATE_SECONDS)))
             if self.rotate_status_loop.seconds != interval:
@@ -111,6 +158,9 @@ class BotStatus(commands.Cog):
             if self.rotate_status_loop.is_running():
                 self.rotate_status_loop.cancel()
 
+    async def refresh_presence(self):
+        await self._apply_saved_status()
+
     @commands.Cog.listener()
     async def on_ready(self):
         await self._apply_saved_status()
@@ -118,6 +168,8 @@ class BotStatus(commands.Cog):
     @tasks.loop(seconds=DEFAULT_ROTATE_SECONDS)
     async def rotate_status_loop(self):
         data = await self._get_data()
+        if data.get("update_override_active"):
+            return
         statuses = data.get("statuses") or []
         if not statuses:
             return
@@ -129,140 +181,106 @@ class BotStatus(commands.Cog):
     async def before_rotate(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="setstatus", description="Αλλάζει το status του bot (σταθερό, απενεργοποιεί το rotation)")
-    @app_commands.describe(type="Τύπος status", text="Το κείμενο που θα εμφανίζεται")
-    @app_commands.choices(type=[
-        app_commands.Choice(name="Playing", value="playing"),
-        app_commands.Choice(name="Watching", value="watching"),
-        app_commands.Choice(name="Listening", value="listening"),
-        app_commands.Choice(name="Competing", value="competing"),
-    ])
-    async def setstatus(self, interaction: discord.Interaction, type: app_commands.Choice[str], text: str):
-        if not await self._is_owner(interaction):
-            await interaction.response.send_message(" Μόνο ο Owner ή ο Installer μπορεί να αλλάξει το status του bot.", ephemeral=True)
-            return
-
+    async def set_update_override(self, text: str):
         data = await self._get_data()
-        data["type"] = type.value
-        data["text"] = text
-        data["rotate"] = False
+        data["update_override_active"] = True
+        data["update_override_text"] = text
+        await self._save(data)
+        self._last_override_text = text
+        await self._apply_saved_status()
+
+    async def clear_update_override(self):
+        data = await self._get_data()
+        data["update_override_active"] = False
         await self._save(data)
         await self._apply_saved_status()
 
-        await interaction.response.send_message(
-            f"Το status ενημερώθηκε: **{type.name} {text}**", ephemeral=True
+    def _build_update_panel(self, current_text: str, active: bool) -> list:
+        state_line = (
+            f"> Update Mode: ACTIVE\n• Live status: **{current_text}**"
+            if active else
+            "> Update Mode: inactive\nΤο bot δείχνει τα κανονικά live status."
         )
+        return [{
+            "type": 17,
+            "accent_color": 0xE67E22 if active else 0x5865F2,
+            "components": [
+                {"type": 10, "content": "> Update Panel"},
+                {"type": 14},
+                {"type": 10, "content": state_line},
+                {"type": 14},
+                {
+                    "type": 1,
+                    "components": [
+                        {"type": 2, "label": "Set / Edit Text", "style": 1, "custom_id": "upd_set"},
+                        {"type": 2, "label": "Refresh",         "style": 2, "custom_id": "upd_refresh"},
+                        {
+                            "type": 2,
+                            "label": "Finish Update",
+                            "style": 4 if active else 2,
+                            "custom_id": "upd_finish",
+                            "disabled": not active,
+                        },
+                    ]
+                }
+            ]
+        }]
 
-    @app_commands.command(name="setpresence", description="Αλλάζει την εμφάνιση του bot (online/idle/dnd/invisible)")
-    @app_commands.describe(status="Η κατάσταση εμφάνισης")
-    @app_commands.choices(status=[
-        app_commands.Choice(name="Online", value="online"),
-        app_commands.Choice(name="Idle", value="idle"),
-        app_commands.Choice(name="Do Not Disturb", value="dnd"),
-        app_commands.Choice(name="Invisible (Offline)", value="invisible"),
-    ])
-    async def setpresence(self, interaction: discord.Interaction, status: app_commands.Choice[str]):
-        if not await self._is_owner(interaction):
-            await interaction.response.send_message(" Μόνο ο Owner ή ο Installer μπορεί να αλλάξει την εμφάνιση του bot.", ephemeral=True)
-            return
+    @app_commands.command(name="update", description="[Installer Only] Update-mode live status panel (main server only)")
+    async def update_cmd(self, interaction: discord.Interaction):
+        if not self._is_installer(interaction):
+            await no_access(interaction, "Μόνο ο Installer μπορεί να χρησιμοποιήσει το /update."); return
+        if not self._is_main_server(interaction):
+            await no_access(interaction, "Η εντολή /update δουλεύει μόνο στον main server."); return
 
+        await interaction.response.defer(ephemeral=True)
         data = await self._get_data()
-        data["presence"] = status.value
-        await self._save(data)
-        await self._apply_saved_status()
-
-        await interaction.response.send_message(
-            f"Η εμφάνιση του bot άλλαξε σε **{STATUS_NAMES_GR.get(status.value, status.name)}**. "
-            f"Το bot συνεχίζει να λειτουργεί κανονικά (moderation/anti-nuke ενεργά).",
+        await edit_original_cv2(
+            interaction,
+            self._build_update_panel(data.get("update_override_text", ""), data.get("update_override_active", False)),
             ephemeral=True,
         )
 
-    @app_commands.command(name="addstatus", description="Προσθέτει ένα status στη λίστα εναλλαγής (rotation)")
-    @app_commands.describe(type="Τύπος status", text="Το κείμενο που θα εμφανίζεται")
-    @app_commands.choices(type=[
-        app_commands.Choice(name="Playing", value="playing"),
-        app_commands.Choice(name="Watching", value="watching"),
-        app_commands.Choice(name="Listening", value="listening"),
-        app_commands.Choice(name="Competing", value="competing"),
-    ])
-    async def addstatus(self, interaction: discord.Interaction, type: app_commands.Choice[str], text: str):
-        if not await self._is_owner(interaction):
-            await interaction.response.send_message(" Μόνο ο Owner ή ο Installer μπορεί να το κάνει αυτό.", ephemeral=True)
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+        cid = interaction.data.get("custom_id", "")
+        if cid not in ("upd_set", "upd_refresh", "upd_finish"):
             return
 
-        data = await self._get_data()
-        statuses = data.get("statuses") or []
-        statuses.append({"type": type.value, "text": text})
-        data["statuses"] = statuses
-        await self._save(data)
-
-        await interaction.response.send_message(
-            f"Προστέθηκε στη λίστα: **{type.name} {text}** (τώρα έχει {len(statuses)} statuses).\n"
-            f"Χρησιμοποίησε `/togglerotation` για να ενεργοποιήσεις την αυτόματη εναλλαγή.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="removestatus", description="Αφαιρεί ένα status από τη λίστα εναλλαγής")
-    @app_commands.describe(index="Ο αριθμός του status (δες με /liststatus)")
-    async def removestatus(self, interaction: discord.Interaction, index: int):
-        if not await self._is_owner(interaction):
-            await interaction.response.send_message(" Μόνο ο Owner ή ο Installer μπορεί να το κάνει αυτό.", ephemeral=True)
+        if not self._is_installer(interaction):
+            await respond_cv2(interaction, [
+                {"type": 17, "accent_color": 0xED4245, "components": [
+                    {"type": 10, "content": "> Access Denied\nΜόνο ο Bot Creator."}
+                ]}
+            ], ephemeral=True)
+            return
+        if not self._is_main_server(interaction):
+            await respond_cv2(interaction, [
+                {"type": 17, "accent_color": 0xED4245, "components": [
+                    {"type": 10, "content": "> Access Denied\nΜόνο στον main server."}
+                ]}
+            ], ephemeral=True)
             return
 
-        data = await self._get_data()
-        statuses = data.get("statuses") or []
-        if index < 1 or index > len(statuses):
-            await interaction.response.send_message("Μη έγκυρος αριθμός.", ephemeral=True)
+        if cid == "upd_set":
+            await interaction.response.send_modal(UpdateTextModal(self))
             return
 
-        removed = statuses.pop(index - 1)
-        data["statuses"] = statuses
-        await self._save(data)
-
-        await interaction.response.send_message(
-            f"Αφαιρέθηκε: **{removed.get('text')}**", ephemeral=True
-        )
-
-    @app_commands.command(name="liststatus", description="Δείχνει τη λίστα των statuses εναλλαγής")
-    async def liststatus(self, interaction: discord.Interaction):
-        data = await self._get_data()
-        statuses = data.get("statuses") or []
-        if not statuses:
-            await interaction.response.send_message("Δεν υπάρχουν statuses στη λίστα.", ephemeral=True)
-            return
-
-        lines = [f"{i+1}. **{s.get('type')}** — {s.get('text')}" for i, s in enumerate(statuses)]
-        state = "ενεργό ✅" if data.get("rotate") else "ανενεργό ❌"
-        await interaction.response.send_message(
-            f"**Rotation:** {state} | **Interval:** {data.get('interval')}s | **Presence:** {STATUS_NAMES_GR.get(data.get('presence'), data.get('presence'))}\n\n"
-            + "\n".join(lines),
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="togglerotation", description="Ενεργοποιεί/απενεργοποιεί την αυτόματη εναλλαγή status")
-    @app_commands.describe(interval="Δευτερόλεπτα ανάμεσα σε κάθε αλλαγή (προαιρετικό)")
-    async def togglerotation(self, interaction: discord.Interaction, interval: int | None = None):
-        if not await self._is_owner(interaction):
-            await interaction.response.send_message(" Μόνο ο Owner ή ο Installer μπορεί να το κάνει αυτό.", ephemeral=True)
-            return
-
-        data = await self._get_data()
-        if not data.get("statuses"):
-            await interaction.response.send_message(
-                "Δεν έχεις προσθέσει statuses. Χρησιμοποίησε πρώτα `/addstatus`.", ephemeral=True
+        if cid == "upd_refresh":
+            data = await self._get_data()
+            await self._apply_saved_status()
+            await update_cv2(
+                interaction,
+                self._build_update_panel(data.get("update_override_text", ""), data.get("update_override_active", False)),
             )
             return
 
-        data["rotate"] = not data.get("rotate", False)
-        if interval:
-            data["interval"] = max(5, interval)
-        await self._save(data)
-        await self._apply_saved_status()
-
-        state = "ενεργοποιήθηκε ✅" if data["rotate"] else "απενεργοποιήθηκε ❌"
-        await interaction.response.send_message(
-            f"Το rotation {state} (κάθε {data.get('interval')}s).", ephemeral=True
-        )
+        if cid == "upd_finish":
+            await self.clear_update_override()
+            await update_cv2(interaction, self._build_update_panel("", False))
+            return
 
 
 async def setup(bot: commands.Bot):
