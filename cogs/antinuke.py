@@ -63,11 +63,26 @@ class AntiNuke(commands.Cog):
 
         hierarchy_warning = not timeout_ok and not stripped_roles
 
+        # Remember the ORIGINAL send_messages/connect values per channel before we
+        # touch anything, so /unlock can restore the exact prior state instead of
+        # just clearing the fields to "inherit" (which wipes any explicit
+        # allow/deny the owner had set before the lockdown).
+        original_perms = json.loads(await Database.get_setting(gid, "lockdown_original_perms", "{}") or "{}")
+
         tasks        = []
         locked_ids   = []
         for channel in guild.channels:
             if isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
                 ow = channel.overwrites_for(guild.default_role)
+                cid_str = str(channel.id)
+                # Only capture the original state the first time this channel gets
+                # locked — if a lockdown is already active and triggers again, don't
+                # let the already-locked (False/False) values overwrite the real original.
+                if cid_str not in original_perms:
+                    original_perms[cid_str] = {
+                        "send_messages": ow.send_messages,
+                        "connect":       ow.connect,
+                    }
                 ow.send_messages = False
                 ow.connect       = False
                 tasks.append(channel.set_permissions(
@@ -81,6 +96,7 @@ class AntiNuke(commands.Cog):
         existing = json.loads(await Database.get_setting(gid, "lockdown_channels", "[]") or "[]")
         merged   = sorted(set(existing) | set(locked))
         await Database.set_setting(gid, "lockdown_channels", json.dumps(merged))
+        await Database.set_setting(gid, "lockdown_original_perms", json.dumps(original_perms))
         await Database.set_setting(gid, "lockdown_active", "1")
 
         await Database.log_event(gid, "mass_action", {
@@ -140,6 +156,8 @@ class AntiNuke(commands.Cog):
             ], ephemeral=True)
             return
 
+        original_perms = json.loads(await Database.get_setting(gid, "lockdown_original_perms", "{}") or "{}")
+
         guild  = interaction.guild
         tasks  = []
         undone = []
@@ -148,8 +166,11 @@ class AntiNuke(commands.Cog):
             if channel is None:
                 continue
             ow = channel.overwrites_for(guild.default_role)
-            ow.send_messages = None
-            ow.connect       = None
+            saved = original_perms.get(str(cid), {})
+            # Restore the exact pre-lockdown values (which may themselves be
+            # True/False/None) instead of blanket-clearing to "inherit".
+            ow.send_messages = saved.get("send_messages", None)
+            ow.connect       = saved.get("connect", None)
             tasks.append(channel.set_permissions(
                 guild.default_role, overwrite=ow, reason=f"Lockdown lifted by {interaction.user}"
             ))
@@ -159,6 +180,7 @@ class AntiNuke(commands.Cog):
         unlocked = sum(1 for r in results if not isinstance(r, Exception))
 
         await Database.set_setting(gid, "lockdown_channels", "[]")
+        await Database.set_setting(gid, "lockdown_original_perms", "{}")
         await Database.set_setting(gid, "lockdown_active", "0")
         await Database.log_event(gid, "lockdown", {
             "user": str(interaction.user), "id": str(interaction.user.id),
