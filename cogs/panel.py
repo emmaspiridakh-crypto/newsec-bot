@@ -199,6 +199,55 @@ def build_help(is_owner: bool) -> list:
     ]}]
 
 
+# ── All Servers ────────────────────────────────────────────────────────────────
+
+ALLSERVERS_PAGE_SIZE = 8
+
+
+def build_allservers(guilds: list, page: int) -> list:
+    total      = len(guilds)
+    pages      = max(1, (total + ALLSERVERS_PAGE_SIZE - 1) // ALLSERVERS_PAGE_SIZE)
+    page       = max(0, min(page, pages - 1))
+    start      = page * ALLSERVERS_PAGE_SIZE
+    page_items = guilds[start:start + ALLSERVERS_PAGE_SIZE]
+
+    header = {
+        "type": 9,
+        "components": [{"type": 10, "content": f"> All Servers ({total})\nPage {page + 1}/{pages}"}],
+    }
+
+    sections = []
+    for guild in page_items:
+        section = {
+            "type": 9,
+            "components": [{"type": 10, "content": (
+                f"**{guild.name}**\n"
+                f"> ID: `{guild.id}`  •  Members: {guild.member_count}"
+            )}],
+            "accessory": {
+                "type": 2,
+                "label": "Leave Server",
+                "style": 4,
+                "custom_id": f"allsrv_leave_{guild.id}_{page}"
+            }
+        }
+        sections.append(section)
+
+    nav_row = {
+        "type": 1,
+        "components": [
+            {"type": 2, "label": "◀ Prev", "style": 2, "custom_id": f"allsrv_page_{page - 1}", "disabled": page <= 0},
+            {"type": 2, "label": "Next ▶", "style": 2, "custom_id": f"allsrv_page_{page + 1}", "disabled": page >= pages - 1},
+        ]
+    }
+
+    return [{
+        "type": 17,
+        "accent_color": 0x5865F2,
+        "components": [header, {"type": 14}, *sections, {"type": 14}, nav_row]
+    }]
+
+
 # ── Cog ────────────────────────────────────────────────────────────────────────
 
 class Panel(commands.Cog):
@@ -208,8 +257,27 @@ class Panel(commands.Cog):
     async def _is_owner(self, guild_id: int, uid: int) -> bool:
         return await Database.is_server_owner(str(guild_id), str(uid), self.bot.installer_id)
 
+    def _is_installer(self, interaction: discord.Interaction) -> bool:
+        return str(interaction.user.id) == str(self.bot.installer_id)
+
+    def _is_main_server(self, interaction: discord.Interaction) -> bool:
+        main_id = getattr(self.bot, "main_server_id", None)
+        return bool(main_id) and str(interaction.guild_id) == str(main_id)
+
     def _icon(self, guild: discord.Guild) -> str | None:
         return str(guild.icon.url) if guild and guild.icon else None
+
+    # ── /allservers ───────────────────────────────────────
+    @app_commands.command(name="allservers", description="[Installer Only] List every server the bot is in (main server only)")
+    async def allservers(self, interaction: discord.Interaction):
+        if not self._is_installer(interaction):
+            await no_access(interaction, "Μόνο ο Installer μπορεί να χρησιμοποιήσει το /allservers."); return
+        if not self._is_main_server(interaction):
+            await no_access(interaction, "Η εντολή /allservers δουλεύει μόνο στον main server."); return
+
+        await interaction.response.defer(ephemeral=True)
+        guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
+        await edit_original_cv2(interaction, build_allservers(guilds, 0), ephemeral=True)
 
     # ── /panel ────────────────────────────────────────────
     @app_commands.command(name="panel", description="Security Control Panel")
@@ -276,6 +344,49 @@ class Panel(commands.Cog):
             return
 
         cid      = interaction.data.get("custom_id", "")
+
+        # ── All Servers: page nav / leave server ───────────
+        if cid.startswith("allsrv_page_") or cid.startswith("allsrv_leave_"):
+            if not self._is_installer(interaction):
+                await respond_cv2(interaction, [
+                    {"type": 17, "accent_color": 0xED4245, "components": [
+                        {"type": 10, "content": "> Access Denied\nΜόνο ο Installer."}
+                    ]}
+                ], ephemeral=True)
+                return
+            if not self._is_main_server(interaction):
+                await respond_cv2(interaction, [
+                    {"type": 17, "accent_color": 0xED4245, "components": [
+                        {"type": 10, "content": "> Access Denied\nΜόνο στον main server."}
+                    ]}
+                ], ephemeral=True)
+                return
+
+            if cid.startswith("allsrv_page_"):
+                page = int(cid.replace("allsrv_page_", ""))
+                guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
+                await update_cv2(interaction, build_allservers(guilds, page))
+                return
+
+            # allsrv_leave_<guild_id>_<page>
+            rest = cid.replace("allsrv_leave_", "")
+            guild_id_str, _, page_str = rest.rpartition("_")
+            page = int(page_str) if page_str.isdigit() else 0
+            target = self.bot.get_guild(int(guild_id_str))
+            if target:
+                try:
+                    await target.leave()
+                except Exception as e:
+                    await respond_cv2(interaction, [
+                        {"type": 17, "accent_color": 0xED4245, "components": [
+                            {"type": 10, "content": f"> Error\nΔεν μπόρεσα να αφήσω το server: {e}"}
+                        ]}
+                    ], ephemeral=True)
+                    return
+            guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
+            await update_cv2(interaction, build_allservers(guilds, page))
+            return
+
         gid      = str(interaction.guild_id)
         is_owner = await self._is_owner(interaction.guild_id, interaction.user.id)
         is_admin = interaction.user.guild_permissions.administrator
