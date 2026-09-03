@@ -1,4 +1,4 @@
-import discord
+iimport discord
 from discord.ext import commands
 import asyncio
 import os
@@ -9,17 +9,21 @@ from keep_alive import keep_alive
 
 load_dotenv()
 
-TOKEN        = os.getenv("TOKEN")
-INSTALLER_ID = os.getenv("INSTALLER_ID")
+TOKEN          = os.getenv("TOKEN")
+INSTALLER_ID   = os.getenv("INSTALLER_ID")
+MAIN_SERVER_ID = os.getenv("MAIN_SERVER_ID")
 
 if not TOKEN:
     print("❌ TOKEN missing from .env"); exit(1)
 if not INSTALLER_ID:
     print("❌ INSTALLER_ID missing from .env"); exit(1)
+if not MAIN_SERVER_ID:
+    print("⚠ MAIN_SERVER_ID missing from .env — /allservers and /update will be disabled everywhere.")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="§", intents=intents)
-bot.installer_id = INSTALLER_ID
+bot.installer_id   = INSTALLER_ID
+bot.main_server_id = MAIN_SERVER_ID
 
 COGS = [
     "cogs.panel",
@@ -34,33 +38,21 @@ COGS = [
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(bot.guilds)} Server Protected"
-        )
-    )
     print(f"✅ {bot.user} online | Installer: {INSTALLER_ID} | Servers: {len(bot.guilds)}")
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     print(f"[+] Joined: {guild.name} ({guild.id}) — Total: {len(bot.guilds)}")
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"🔒 {len(bot.guilds)} Server Protected"
-        )
-    )
+    status_cog = bot.get_cog("BotStatus")
+    if status_cog:
+        await status_cog.refresh_presence()
 
 @bot.event
 async def on_guild_remove(guild: discord.Guild):
     print(f"[-] Left: {guild.name} ({guild.id}) — Total: {len(bot.guilds)}")
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"🔒 {len(bot.guilds)} Server Protected"
-        )
-    )
+    status_cog = bot.get_cog("BotStatus")
+    if status_cog:
+        await status_cog.refresh_presence()
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
