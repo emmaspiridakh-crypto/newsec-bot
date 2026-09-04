@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 
 import discord
 from discord import app_commands
@@ -150,8 +151,9 @@ class BotStatus(commands.Cog):
 
         try:
             await self.bot.change_presence(status=discord_status, activity=activity)
-        except discord.HTTPException:
-            pass
+        except Exception:
+            print("[BotStatus] change_presence failed:")
+            traceback.print_exc()
 
     async def _apply_saved_status(self):
         data = await self._get_data()
@@ -173,8 +175,12 @@ class BotStatus(commands.Cog):
             if self.rotate_status_loop.seconds != interval:
                 self.rotate_status_loop.change_interval(seconds=interval)
             if not self.rotate_status_loop.is_running():
+                print(f"[BotStatus] starting rotate loop, interval={interval}s, statuses={data.get('statuses')}")
                 self.rotate_status_loop.start()
+            else:
+                print("[BotStatus] rotate loop already running")
         else:
+            print(f"[BotStatus] rotate NOT started — rotate={data.get('rotate')} statuses={data.get('statuses')}")
             if self.rotate_status_loop.is_running():
                 self.rotate_status_loop.cancel()
 
@@ -187,15 +193,20 @@ class BotStatus(commands.Cog):
 
     @tasks.loop(seconds=DEFAULT_ROTATE_SECONDS)
     async def rotate_status_loop(self):
-        data = await self._get_data()
-        if data.get("update_override_active"):
-            return
-        statuses = data.get("statuses") or []
-        if not statuses:
-            return
-        self._rotate_index = (self._rotate_index + 1) % len(statuses)
-        entry = statuses[self._rotate_index]
-        await self._apply_presence(entry)
+        try:
+            data = await self._get_data()
+            if data.get("update_override_active") and data.get("update_override_text"):
+                return
+            statuses = data.get("statuses") or []
+            if not statuses:
+                return
+            self._rotate_index = (self._rotate_index + 1) % len(statuses)
+            entry = statuses[self._rotate_index]
+            print(f"[BotStatus] rotate -> index {self._rotate_index}: {entry}")
+            await self._apply_presence(entry)
+        except Exception:
+            print("[BotStatus] rotate_status_loop crashed:")
+            traceback.print_exc()
 
     @rotate_status_loop.before_loop
     async def before_rotate(self):
