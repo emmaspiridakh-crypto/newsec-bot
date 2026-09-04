@@ -99,13 +99,11 @@ class BotStatus(commands.Cog):
         return bool(main_id) and str(interaction.guild_id) == str(main_id)
 
     # Πεδία που ΕΠΙΤΡΕΠΕΤΑΙ να persist-άρονται στη βάση.
-    # Το "statuses"/"type"/"text" ΔΕΝ persist-άρονται πλέον — έρχονται πάντα
-    # φρέσκα από το _default_data() στον κώδικα, ώστε αλλαγές εκεί να πιάνουν
-    # αμέσως χωρίς να "κολλάνε" σε παλιά τιμή αποθηκευμένη στη βάση.
+    # Αυτά είναι τα ΜΟΝΑ πεδία που ρυθμίζονται από κάποια εντολή (/update).
+    # Όλα τα υπόλοιπα (type, text, statuses, presence, rotate, interval)
+    # δεν έχουν καμία εντολή που να τα αλλάζει — είναι σταθερές του κώδικα
+    # και ΔΕΝ πρέπει να διαβάζονται από παλιές τιμές στη βάση.
     _PERSISTED_KEYS = (
-        "presence",
-        "rotate",
-        "interval",
         "update_override_active",
         "update_override_text",
     )
