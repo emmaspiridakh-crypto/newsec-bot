@@ -157,7 +157,11 @@ class BotStatus(commands.Cog):
         data = await self._get_data()
         self._last_override_text = data.get("update_override_text", "")
 
-        if data.get("update_override_active"):
+        # Override mode ισχύει ΜΟΝΟ αν υπάρχει πραγματικό override κείμενο.
+        # Πριν, αν το update_override_active έμενε True στη βάση (π.χ. δεν
+        # πατήθηκε ποτέ "Finish Update") το bot έκανε return εδώ και δεν
+        # έφτανε ΠΟΤΕ στον κώδικα που ξεκινάει το rotation loop.
+        if data.get("update_override_active") and data.get("update_override_text"):
             if self.rotate_status_loop.is_running():
                 self.rotate_status_loop.cancel()
             await self._apply_presence()
