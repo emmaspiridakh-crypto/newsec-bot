@@ -27,12 +27,14 @@ def build_panel(cfg: dict, disabled: list, guild_icon: str | None) -> list:
     role_lim   = cfg.get("role_action_limit", "3")
     role_win   = cfg.get("role_action_window","10")
 
-    header = {
-        "type": 9,
-        "components": [{"type": 10, "content": "> Security Control Panel\nManage settings."}],
-    }
     if guild_icon:
-        header["accessory"] = {"type": 11, "media": {"url": guild_icon}}
+        header = {
+            "type": 9,
+            "components": [{"type": 10, "content": "> Security Control Panel\nManage settings."}],
+            "accessory": {"type": 11, "media": {"url": guild_icon}},
+        }
+    else:
+        header = {"type": 10, "content": "> Security Control Panel\nManage settings."}
 
     def section(key, name, detail, btn_id):
         return {
@@ -86,12 +88,14 @@ def build_status(cfg: dict, disabled: list, wl_u: int, wl_b: int, wl_c: int,
                  guild_icon: str | None) -> list:
     def s(k): return "[ON]" if k not in disabled else "[OFF]"
 
-    header = {
-        "type": 9,
-        "components": [{"type": 10, "content": "> Security Status"}],
-    }
     if guild_icon:
-        header["accessory"] = {"type": 11, "media": {"url": guild_icon}}
+        header = {
+            "type": 9,
+            "components": [{"type": 10, "content": "> Security Status"}],
+            "accessory": {"type": 11, "media": {"url": guild_icon}},
+        }
+    else:
+        header = {"type": 10, "content": "> Security Status"}
 
     return [{
         "type": 17,
@@ -151,12 +155,14 @@ def build_logs(events: list, guild_icon: str | None) -> list:
             lines.append(f"• **{label}**  —  {who}  <t:{ts}:R>")
         body = "\n".join(lines)
 
-    header = {
-        "type": 9,
-        "components": [{"type": 10, "content": "> Recent Security Events"}],
-    }
     if guild_icon:
-        header["accessory"] = {"type": 11, "media": {"url": guild_icon}}
+        header = {
+            "type": 9,
+            "components": [{"type": 10, "content": "> Recent Security Events"}],
+            "accessory": {"type": 11, "media": {"url": guild_icon}},
+        }
+    else:
+        header = {"type": 10, "content": "> Recent Security Events"}
 
     return [{"type": 17, "accent_color": 0x8B0000,
              "components": [header, {"type": 14}, {"type": 10, "content": body}]}]
@@ -211,10 +217,10 @@ def build_allservers(guilds: list, page: int) -> list:
     start      = page * ALLSERVERS_PAGE_SIZE
     page_items = guilds[start:start + ALLSERVERS_PAGE_SIZE]
 
-    header = {
-        "type": 9,
-        "components": [{"type": 10, "content": f"> All Servers ({total})\nPage {page + 1}/{pages}"}],
-    }
+    # Το header ήταν Section (type 9) χωρίς accessory — το Discord API απαιτεί
+    # accessory σε κάθε Section, γι' αυτό το /allservers έσκαγε πάντα με 400.
+    # Δεν χρειάζεται accessory εδώ, οπότε το κάνουμε απλό Text Display (type 10).
+    header = {"type": 10, "content": f"> All Servers ({total})\nPage {page + 1}/{pages}"}
 
     sections = []
     for guild in page_items:
