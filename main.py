@@ -6,6 +6,7 @@ import traceback
 from dotenv import load_dotenv
 from database import Database
 from keep_alive import keep_alive
+from utils.cv2_helper import close_session
 
 load_dotenv()
 
@@ -81,5 +82,6 @@ async def main():
             await bot.start(TOKEN)
         finally:
             await Database.close()
+            await close_session()
 
 asyncio.run(main())
