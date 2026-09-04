@@ -4,16 +4,19 @@ import os
 TOKEN = os.getenv("TOKEN")
 
 _session: aiohttp.ClientSession | None = None
+_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
 def get_session() -> aiohttp.ClientSession:
     """Επιστρέφει ένα shared aiohttp session (δημιουργείται μία φορά).
     Πριν έφτιαχνε καινούριο ClientSession (νέο TCP+TLS handshake) σε ΚΑΘΕ
     κλήση, κάτι που έκανε αργά όλα τα panels (πιο αισθητό στο /allservers
-    λόγω των πολλών page-navigation κλικ)."""
+    λόγω των πολλών page-navigation κλικ). Έχει timeout=15s ώστε ένα
+    κολλημένο request να αποτυγχάνει γρήγορα αντί να κρεμάει για πάντα
+    (το 'is thinking...' που δεν έληγε ποτέ)."""
     global _session
     if _session is None or _session.closed:
-        _session = aiohttp.ClientSession()
+        _session = aiohttp.ClientSession(timeout=_TIMEOUT)
     return _session
 
 
@@ -31,23 +34,29 @@ async def respond_cv2(interaction, components: list, ephemeral: bool = False):
     if ephemeral:
         flags |= 1 << 6
     payload = {"type": 4, "data": {"flags": flags, "components": components}}
-    async with get_session().post(
-        f"https://discord.com/api/v10/interactions/{interaction.id}/{interaction.token}/callback",
-        json=payload
-    ) as r:
-        if r.status not in (200, 204):
-            print(f"[CV2:respond] {r.status} {await r.text()}")
+    try:
+        async with get_session().post(
+            f"https://discord.com/api/v10/interactions/{interaction.id}/{interaction.token}/callback",
+            json=payload
+        ) as r:
+            if r.status not in (200, 204):
+                print(f"[CV2:respond] {r.status} {await r.text()}")
+    except Exception as e:
+        print(f"[CV2:respond] EXCEPTION: {type(e).__name__}: {e}")
 
 
 async def update_cv2(interaction, components: list):
     """Update the original message from a button (type 7)."""
     payload = {"type": 7, "data": {"flags": 1 << 15, "components": components}}
-    async with get_session().post(
-        f"https://discord.com/api/v10/interactions/{interaction.id}/{interaction.token}/callback",
-        json=payload
-    ) as r:
-        if r.status not in (200, 204):
-            print(f"[CV2:update] {r.status} {await r.text()}")
+    try:
+        async with get_session().post(
+            f"https://discord.com/api/v10/interactions/{interaction.id}/{interaction.token}/callback",
+            json=payload
+        ) as r:
+            if r.status not in (200, 204):
+                print(f"[CV2:update] {r.status} {await r.text()}")
+    except Exception as e:
+        print(f"[CV2:update] EXCEPTION: {type(e).__name__}: {e}")
 
 
 async def edit_original_cv2(interaction, components: list, ephemeral: bool = False):
@@ -56,12 +65,15 @@ async def edit_original_cv2(interaction, components: list, ephemeral: bool = Fal
     flags = 1 << 15
     if ephemeral:
         flags |= 1 << 6
-    async with get_session().patch(
-        f"https://discord.com/api/v10/webhooks/{interaction.application_id}/{interaction.token}/messages/@original",
-        json={"flags": flags, "components": components}
-    ) as r:
-        if r.status not in (200, 204):
-            print(f"[CV2:edit_original] {r.status} {await r.text()}")
+    try:
+        async with get_session().patch(
+            f"https://discord.com/api/v10/webhooks/{interaction.application_id}/{interaction.token}/messages/@original",
+            json={"flags": flags, "components": components}
+        ) as r:
+            if r.status not in (200, 204):
+                print(f"[CV2:edit_original] {r.status} {await r.text()}")
+    except Exception as e:
+        print(f"[CV2:edit_original] EXCEPTION: {type(e).__name__}: {e}")
 
 
 async def followup_cv2(interaction, components: list, ephemeral: bool = False):
