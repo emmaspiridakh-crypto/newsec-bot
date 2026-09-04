@@ -97,18 +97,34 @@ class BotStatus(commands.Cog):
         main_id = getattr(self.bot, "main_server_id", None)
         return bool(main_id) and str(interaction.guild_id) == str(main_id)
 
+    # Πεδία που ΕΠΙΤΡΕΠΕΤΑΙ να persist-άρονται στη βάση.
+    # Το "statuses"/"type"/"text" ΔΕΝ persist-άρονται πλέον — έρχονται πάντα
+    # φρέσκα από το _default_data() στον κώδικα, ώστε αλλαγές εκεί να πιάνουν
+    # αμέσως χωρίς να "κολλάνε" σε παλιά τιμή αποθηκευμένη στη βάση.
+    _PERSISTED_KEYS = (
+        "presence",
+        "rotate",
+        "interval",
+        "update_override_active",
+        "update_override_text",
+    )
+
     async def _get_data(self) -> dict:
         raw = await Database.get_setting(GLOBAL_KEY, "data", None)
         data = _default_data()
         if raw:
             try:
-                data.update(json.loads(raw))
+                saved = json.loads(raw)
+                for key in self._PERSISTED_KEYS:
+                    if key in saved:
+                        data[key] = saved[key]
             except Exception:
                 pass
         return data
 
     async def _save(self, data: dict):
-        await Database.set_setting(GLOBAL_KEY, "data", json.dumps(data))
+        to_save = {k: data[k] for k in self._PERSISTED_KEYS if k in data}
+        await Database.set_setting(GLOBAL_KEY, "data", json.dumps(to_save))
 
     def _build_activity(self, entry: dict) -> discord.Activity:
         activity_type = entry.get("type", "watching")
