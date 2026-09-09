@@ -254,6 +254,57 @@ def build_allservers(guilds: list, page: int) -> list:
     }]
 
 
+BANLIST_PAGE_SIZE = 8
+
+
+def build_banlist(entries: list, page: int) -> list:
+    total      = len(entries)
+    pages      = max(1, (total + BANLIST_PAGE_SIZE - 1) // BANLIST_PAGE_SIZE)
+    page       = max(0, min(page, pages - 1))
+    start      = page * BANLIST_PAGE_SIZE
+    page_items = entries[start:start + BANLIST_PAGE_SIZE]
+
+    header = {"type": 10, "content": f"> Banned Users — All Servers ({total})\nPage {page + 1}/{pages}"}
+
+    sections = []
+    if not page_items:
+        sections.append({"type": 10, "content": "Δεν βρέθηκαν ban σε κανένα server."})
+    for user, guild, reason in page_items:
+        sections.append({"type": 10, "content": (
+            f"**{user}**  (`{user.id}`)\n"
+            f"> Server: {guild.name} (`{guild.id}`)\n"
+            f"> Reason: {reason or '—'}"
+        )})
+
+    nav_row = {
+        "type": 1,
+        "components": [
+            {"type": 2, "label": "◀ Prev", "style": 2, "custom_id": f"banlist_page_{page - 1}", "disabled": page <= 0},
+            {"type": 2, "label": "Next ▶", "style": 2, "custom_id": f"banlist_page_{page + 1}", "disabled": page >= pages - 1},
+        ]
+    }
+
+    return [{
+        "type": 17,
+        "accent_color": 0xED4245,
+        "components": [header, {"type": 14}, *sections, {"type": 14}, nav_row]
+    }]
+
+
+async def _collect_all_bans(bot: commands.Bot) -> list:
+    entries = []
+    for guild in bot.guilds:
+        try:
+            async for ban_entry in guild.bans(limit=None):
+                entries.append((ban_entry.user, guild, ban_entry.reason))
+        except discord.Forbidden:
+            continue
+        except discord.HTTPException:
+            continue
+    entries.sort(key=lambda e: (e[1].name.lower(), str(e[0])))
+    return entries
+
+
 # ── Cog ────────────────────────────────────────────────────────────────────────
 
 class Panel(commands.Cog):
@@ -284,6 +335,18 @@ class Panel(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
         await edit_original_cv2(interaction, build_allservers(guilds, 0), ephemeral=True)
+
+    # ── /banlist ────────────────────────────────────────────
+    @app_commands.command(name="banlist", description="[Installer Only] List every banned user across every server")
+    async def banlist(self, interaction: discord.Interaction):
+        if not self._is_installer(interaction):
+            await no_access(interaction, "Μόνο ο Installer μπορεί να χρησιμοποιήσει το /banlist."); return
+        if not self._is_main_server(interaction):
+            await no_access(interaction, "Η εντολή /banlist δουλεύει μόνο στον main server."); return
+
+        await interaction.response.defer(ephemeral=True)
+        entries = await _collect_all_bans(self.bot)
+        await edit_original_cv2(interaction, build_banlist(entries, 0), ephemeral=True)
 
     # ── /panel ────────────────────────────────────────────
     @app_commands.command(name="panel", description="Security Control Panel")
@@ -391,6 +454,27 @@ class Panel(commands.Cog):
                     return
             guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
             await update_cv2(interaction, build_allservers(guilds, page))
+            return
+
+        # ── Ban List: page nav ──────────────────────────────
+        if cid.startswith("banlist_page_"):
+            if not self._is_installer(interaction):
+                await respond_cv2(interaction, [
+                    {"type": 17, "accent_color": 0xED4245, "components": [
+                        {"type": 10, "content": "> Access Denied\nΜόνο ο Installer."}
+                    ]}
+                ], ephemeral=True)
+                return
+            if not self._is_main_server(interaction):
+                await respond_cv2(interaction, [
+                    {"type": 17, "accent_color": 0xED4245, "components": [
+                        {"type": 10, "content": "> Access Denied\nΜόνο στον main server."}
+                    ]}
+                ], ephemeral=True)
+                return
+            page = int(cid.replace("banlist_page_", ""))
+            entries = await _collect_all_bans(self.bot)
+            await update_cv2(interaction, build_banlist(entries, page))
             return
 
         gid      = str(interaction.guild_id)
