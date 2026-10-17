@@ -53,7 +53,7 @@ class WhitelistCmd(commands.Cog):
             ], ephemeral=True)
 
         # ── /whitelist bot ────────────────────────────────
-        @wl.command(name="bot", description="Skip verification for a bot")
+        @wl.command(name="bot", description="Trust a bot: skips verification, Anti-Nuke and AutoMod")
         @app_commands.describe(bot_id="Bot ID")
         async def _wl_bot(interaction: discord.Interaction, bot_id: str):
             await interaction.response.defer(ephemeral=True)
