@@ -5,16 +5,28 @@ from database import Database
 from utils.cv2_helper import edit_original_cv2, no_access
 
 CONFIG_KEYS: dict[str, tuple[str, str, str]] = {
-    "alt_age_days":       ("int",            "Account age in days for alt detection",      "30"),
-    "alt_action":         ("choice:kick,log","Action on alt detection (kick / log)",       "kick"),
-    "spam_threshold":     ("int",            "Messages before spam trigger",               "5"),
-    "spam_window_secs":   ("int",            "Spam detection window in seconds",           "5"),
-    "spam_timeout_mins":  ("int",            "Timeout duration for spam in minutes",       "10"),
-    "link_timeout_mins":  ("int",            "Timeout duration for links in minutes",      "60"),
-    "mass_action_limit":  ("int",            "Actions before anti-nuke triggers",          "3"),
-    "mass_action_window": ("int",            "Anti-nuke detection window in seconds",      "10"),
-    "role_action_limit":  ("int",            "Role create/delete actions before trigger",  "3"),
-    "role_action_window": ("int",            "Role Guard detection window in seconds",     "10"),
+    "alt_age_days":         ("int",                    "Account age in days for alt detection",        "30"),
+    "alt_score_threshold":  ("int",                    "Alt score needed to trigger the action",       "50"),
+    "alt_action":           ("choice:kick,log,quarantine", "Action on alt detection",                  "kick"),
+    "spam_threshold":       ("int",                    "Messages before spam trigger",                 "5"),
+    "spam_window_secs":     ("int",                    "Spam detection window in seconds",             "5"),
+    "spam_timeout_mins":    ("int",                    "Timeout duration for spam in minutes",         "10"),
+    "link_timeout_mins":    ("int",                    "Timeout duration for links in minutes",        "60"),
+    "mass_action_limit":    ("int",                    "Actions before anti-nuke triggers",            "3"),
+    "mass_action_window":   ("int",                    "Anti-nuke detection window in seconds",        "10"),
+    "role_action_limit":    ("int",                    "Role create/delete actions before trigger",    "3"),
+    "role_action_window":   ("int",                    "Role Guard detection window in seconds",       "10"),
+    "nuke_timeout_hours":   ("int",                    "Punishment timeout after an Anti-Nuke trigger (hours)", "168"),
+    "chan_action_limit":    ("int",                    "Channel create/edit actions before trigger",   "4"),
+    "chan_action_window":   ("int",                    "Channel Guard window in seconds",              "10"),
+    "emoji_action_limit":   ("int",                    "Emoji/sticker deletes before trigger",         "3"),
+    "emoji_action_window":  ("int",                    "Emoji Guard window in seconds",                "5"),
+    "invite_action_limit":  ("int",                    "Invites created before trigger",               "5"),
+    "invite_action_window": ("int",                    "Invite Guard window in seconds",               "10"),
+    "purge_limit":          ("int",                    "Bulk deletes before trigger",                  "3"),
+    "purge_window":         ("int",                    "Purge Guard window in seconds",                "30"),
+    "everyone_limit":       ("int",                    "Blocked @everyone/@here before trigger",       "3"),
+    "everyone_window":      ("int",                    "Everyone Guard window in seconds",             "60"),
 }
 
 
@@ -83,11 +95,12 @@ class ConfigCmd(commands.Cog):
         # Validate int
         if typ == "int":
             try:
-                int(value)
+                if int(value) < 1:
+                    raise ValueError
             except ValueError:
                 await edit_original_cv2(interaction, [
                     {"type": 17, "accent_color": 0xED4245, "components": [
-                        {"type": 10, "content": f"> Validation Error\n• `{key}` must be a number."}
+                        {"type": 10, "content": f"> Validation Error\n• `{key}` must be a whole number ≥ 1."}
                     ]}
                 ], ephemeral=True)
                 return
