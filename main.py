@@ -1,14 +1,16 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncio
 import os
 import traceback
 from dotenv import load_dotenv
+
+load_dotenv()   # ΠΡΙΝ από τα imports που διαβάζουν env (π.χ. TOKEN στο cv2_helper)
+
 from database import Database
 from keep_alive import keep_alive
 from utils.cv2_helper import close_session
-
-load_dotenv()
+from utils.tracker import ActionTracker
 
 TOKEN          = os.getenv("TOKEN")
 INSTALLER_ID   = os.getenv("INSTALLER_ID")
@@ -22,9 +24,25 @@ if not MAIN_SERVER_ID:
     print("⚠ MAIN_SERVER_ID missing from .env — /allservers and /update will be disabled everywhere.")
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="§", intents=intents)
+
+class SecurityBot(commands.Bot):
+    async def setup_hook(self):
+        # Το sync γίνεται ΜΙΑ φορά στην εκκίνηση (όχι σε κάθε reconnect/on_ready → rate limits)
+        await self.tree.sync()
+        sweep_trackers.start()
+
+
+bot = SecurityBot(command_prefix="§", intents=intents)
 bot.installer_id   = INSTALLER_ID
 bot.main_server_id = MAIN_SERVER_ID
+bot.backup_pause   = {}
+Database.bot       = bot      # ώστε ο πραγματικός owner του server να αναγνωρίζεται ως Server Owner
+
+
+@tasks.loop(minutes=10)
+async def sweep_trackers():
+    """Καθαρίζει τα παλιά κλειδιά των trackers (αποτρέπει memory leak)."""
+    ActionTracker.sweep_all(600)
 
 COGS = [
     "cogs.panel",
@@ -33,12 +51,14 @@ COGS = [
     "cogs.config_cmd",
     "cogs.antinuke",
     "cogs.automod",
+    "cogs.logs",
+    "cogs.backup",
+    "cogs.tools",
     "cogs.bot_status",
 ]
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
     print(f"✅ {bot.user} online | Installer: {INSTALLER_ID} | Servers: {len(bot.guilds)}")
 
 @bot.event
