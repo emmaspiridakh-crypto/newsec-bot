@@ -45,8 +45,8 @@ def _default_data() -> dict:
         "interval": DEFAULT_ROTATE_SECONDS,
 
         "statuses": [
-            {"type": "watching", "text": "〃 Created By: ! 3mma"},
-            {"type": "watching", "text": "〃 Server Protected"},
+            {"type": "watching", "text": "🖥 〃 /sechelp - commands"},
+            {"type": "watching", "text": "🛡 〃 Server Protected"},
         ],
         "update_override_active": False,
         "update_override_text": "",
